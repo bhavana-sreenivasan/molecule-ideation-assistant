@@ -9,7 +9,7 @@ constraints — potency, toxicity, and synthesis feasibility.
 **Reduces analog ideation from 2–4 weeks of manual work to under 5 minutes.**
 
 ---
-
+```
 ## Pipeline
 Lead Compound (ChEMBL API)
 ↓
@@ -20,6 +20,8 @@ RDKit → QED, LogP, Lipinski, PAINS, hERG, Structural alerts
 Llama 3.3 70B (NVIDIA NIM) → Rank + explain top 3
 ↓
 2D Visualizations + Evaluation Metrics
+
+```
 ---
 
 ## Tech Stack
