@@ -1,69 +1,74 @@
 # Molecule Ideation Assistant
 
-**AI-assisted analog generation for drug discovery, built on NVIDIA BioNeMo (MolMIM), RDKit, an LLM reasoner (Muse Glimmer via NVIDIA NIM), and a LangGraph agent loop.**
+**Notebook:** `DRUG_IDEATION_v2.ipynb`
+**Domain:** Drug discovery | **Approach:** Generative AI + cheminformatics + LLM reasoning + agentic workflow
 
-Give it a lead compound (a SMILES string, or an approved drug pulled from ChEMBL) and it generates analogs, scores them against drug-likeness, toxicity, synthesizability and estimated potency, then returns a ranked top 3 with a plain-English medicinal chemistry rationale. A multi-round agent version can regenerate when too many candidates fail the filters and pauses for human approval before the final ranking.
+An AI-assisted pipeline that takes an approved drug (the *lead compound*) and proposes optimised analog candidates. Each candidate is scored on **drug-likeness**, **toxicity risk**, **synthetic accessibility** and **estimated potency**, then ranked by an LLM that explains its choices in plain medicinal-chemistry language.
 
-> **Status:** research / prototype notebook. The scores are screening heuristics, not experimental data or clinical guidance. See [Limitations](#limitations).
+The aim is to cut early analog ideation from weeks of manual effort to a few minutes. It is an ideation and triage tool. It does not replace docking, assays or expert review.
 
 ---
 
-## What it does
+## How it works
 
 ```
-Lead SMILES ──► Generate (MolMIM) ──► Validate & score (RDKit + ChEMBL) ──► Rank & explain (Muse Glimmer)
+Lead SMILES
+    │
+    ▼
+1. GENERATE   NVIDIA BioNeMo MolMIM        → 10 analog SMILES (optimised for QED, min. similarity 0.3)
+    │
+    ▼
+2. VALIDATE   RDKit + ChEMBL               → dedupe, QED, Lipinski, PAINS, hERG heuristic,
+    │                                         reactive-group alerts, SA score, potency estimate
+    ▼
+3. RANK       Muse Glimmer (NVIDIA NIM)    → top 3 with rationale and concerns
 ```
 
-| Stage | Tool | Role |
-|-------|------|------|
-| 1. Generate | NVIDIA BioNeMo **MolMIM** | Produces 10 analogs of the lead, optimizing QED with a minimum similarity of 0.3 |
-| 2. Validate | **RDKit** + **ChEMBL** | Dedupes, then scores each analog on QED, LogP, Lipinski, PAINS, hERG-risk heuristic, reactive-group alerts, SA score and estimated potency |
-| 3. Rank | **Muse Glimmer** (NIM, `meta/muse-glimmer-30b`) | Ranks the top 3 with strengths and concerns for each |
+The final section wraps these stages in a **LangGraph** agent. The agent regenerates when too few candidates pass the filters, and it pauses for **human review** before the final ranking.
 
-### Scoring dimensions
+### Scoring components
 
-| Dimension | Method |
-|-----------|--------|
-| **Drug-likeness** | RDKit QED (higher is better); Lipinski rule of 5 |
-| **Toxicity** | LogP window, PAINS filter catalog, SMARTS alerts for reactive groups (hydroxylamine, acid halide, alkyl halide, azide, epoxide), hERG-risk heuristic |
-| **Synthesis feasibility** | RDKit Contrib SA score (1 = easy, 10 = hard). Under 4 is Easy, under 6 is Moderate, otherwise Complex |
-| **Potency (estimate)** | Similarity-weighted kNN over known ChEMBL activities (pChEMBL) on the lead's most-measured human target, with HIGH/MEDIUM/LOW confidence from nearest-neighbor Tanimoto similarity |
-
-**hERG-risk heuristic.** One point each for a basic aliphatic amine, LogP ≥ 3.5, and ≥ 2 aromatic rings. 0–1 is LOW, 2 is MODERATE, 3 is HIGH. This is a rule of thumb, not a hERG prediction model.
+| Dimension | Method | Notes |
+|---|---|---|
+| Drug-likeness | RDKit `QED` (0–1) | Higher is better. This is also MolMIM's optimisation target. |
+| Rule of 5 | MW ≤ 500, logP ≤ 5, HBD ≤ 5, HBA ≤ 10 | Pass/fail. |
+| Lipophilicity flag | logP > 5 or < 0 | Simple warning. |
+| Assay interference | RDKit **PAINS** filter catalog | Flags pan-assay interference substructures. |
+| Reactive groups | SMARTS alerts | Hydroxylamine, acid halide, alkyl halide, azide, epoxide. |
+| hERG risk | **Heuristic**: +1 each for basic aliphatic amine, logP ≥ 3.5, ≥ 2 aromatic rings (0–1 LOW, 2 MODERATE, 3 HIGH) | A rule of thumb, **not** a hERG prediction model. |
+| Synthesis | RDKit Contrib **SA score** (1 = easy, 10 = hard) | < 4 Easy, < 6 Moderate, otherwise Complex. |
+| Potency | Similarity-weighted kNN (k = 5) on ChEMBL pChEMBL values, Morgan fingerprints | Reports confidence from nearest-neighbour Tanimoto: HIGH ≥ 0.6, MEDIUM ≥ 0.4, otherwise LOW. |
 
 ---
 
 ## Notebook walkthrough
 
-| Step | Content |
-|------|---------|
-| 1–2 | Install dependencies; load API keys from Colab Secrets |
-| 3 | Connectivity test for both the LLM and MolMIM endpoints |
-| 3b | SA score and hERG-risk heuristic helpers |
-| 4–5b | Core pipeline functions, an **aspirin** smoke test, results table and 2D structure grids |
-| 6 | Real drug leads (Imatinib, Gefitinib, Oseltamivir, Metformin, Ciprofloxacin) with PAINS/hERG/alert screening; full run on **Imatinib** |
-| 7 | Pulls approved small molecules (max phase 4) from the **ChEMBL API** instead of a hardcoded list |
-| 8 | Toxicity screening function (PAINS, hERG heuristic, structural alerts) |
-| Potency | ChEMBL-based potency estimator with leave-one-out validation |
-| Evaluation | QED gain, Tanimoto diversity, filter pass rates, synthesis feasibility, potency summary, and plots |
-| LangGraph | Stateful agent loop with regeneration and human-in-the-loop review |
-| Eval | One-shot vs. agent-loop comparison across the five ChEMBL leads |
+| Step | What it does |
+|---|---|
+| 1 | Installs dependencies. |
+| 2 | Loads API keys from Colab Secrets. |
+| 3 | Defines the pipeline and smoke-tests both APIs. It auto-resolves the Muse Glimmer model id from the NIM catalog. |
+| 3b | SA score loader (falls back to downloading from the RDKit GitHub repo) and the hERG heuristic. |
+| 4–5b | Pipeline functions and a first test on **Aspirin**, with 2D structure grids. |
+| 6 | Adds PAINS, hERG and reactive-group screening. Runs **Imatinib** and four other hardcoded drugs as leads. |
+| 7 | Pulls approved small-molecule leads directly from the **ChEMBL** API (`max_phase=4`). |
+| 8 | PAINS toxicity screening function and test. |
+| Potency | Builds a target-specific potency reference from ChEMBL and a leave-one-out error check. |
+| Evaluation | QED gain, Tanimoto diversity, filter pass rates, SA distribution, potency summary and charts. |
+| LangGraph | Agentic loop (generate → validate → diagnose → regenerate or human review → rank) and a comparison against the one-shot pipeline. |
 
-### Agent loop (LangGraph)
+### Agent graph
 
 ```
-generate ─► validate ─► diagnose ──(pass rate < threshold and iterations left)──► generate
-                           │
-                           └──► human_review ──(approved)──► rank ─► END
-                                      │
-                                      └──(rejected)──► generate
+generate → validate → diagnose ──(pass rate < threshold and iterations left)──► generate
+                         │
+                         └──► human_review ──(approved)──► rank → END
+                                   └──(rejected)──► generate
 ```
 
-- **generate:** the first round seeds MolMIM with the lead; later rounds reseed from the best-QED analog of the previous round (MolMIM takes no text feedback, so reseeding is the regeneration step).
-- **validate:** full RDKit, PAINS, hERG and potency scoring, and the pass rate (candidates clearing Lipinski, PAINS and overall toxicity).
-- **diagnose:** finds the most common failure mode and writes feedback.
-- **human_review:** uses LangGraph `interrupt()`, so the run pauses until an approve/reject decision is supplied.
-- **Defaults:** `max_iterations = 4`, `pass_threshold = 0.5`.
+- **Regeneration:** MolMIM takes no text feedback, so the loop reseeds from the best-QED analog of the previous round.
+- **Defaults:** `max_iterations = 4`, `pass_threshold = 0.9`.
+- **Human review:** implemented with LangGraph `interrupt` and `MemorySaver`. The notebook simulates approval; in a real app this would come from a UI.
 
 ---
 
@@ -71,88 +76,75 @@ generate ─► validate ─► diagnose ──(pass rate < threshold and iterat
 
 ### Requirements
 
-- Google Colab (the notebook uses `google.colab.userdata` for secrets), or adapt `get_key()` to read environment variables elsewhere
-- An NVIDIA API key with access to BioNeMo MolMIM and NIM-hosted models
-- Python packages (installed in the first cells):
+The notebook is written for **Google Colab**. It uses `google.colab.userdata` for secrets, and the code that reads them would need changing to run elsewhere.
 
 ```bash
-pip install rdkit pandas requests python-dotenv openai streamlit chembl-webresource-client -q
-pip install -q langgraph langgraph-checkpoint
+pip install rdkit pandas requests python-dotenv openai chembl-webresource-client langgraph langgraph-checkpoint matplotlib numpy
 ```
 
-`matplotlib` and `numpy` are also used and ship with Colab.
+`streamlit` is also installed in Step 1 but is not used in the notebook yet.
 
-### API keys
-
-Add these in **Colab → Secrets** (🔑 icon) and enable notebook access:
+### API keys (Colab Secrets)
 
 | Secret | Used for |
-|--------|----------|
-| `NVIDIA_API_KEY` | MolMIM molecule generation (required) |
-| `LLM_API_KEY` | Muse Glimmer ranking. Falls back to `LLAMA_API_KEY`, then `NVIDIA_API_KEY` |
+|---|---|
+| `NVIDIA_API_KEY` | BioNeMo MolMIM analog generation. |
+| `LLM_API_KEY` | Muse Glimmer ranking via NVIDIA NIM. Falls back to `LLAMA_API_KEY`, then `NVIDIA_API_KEY`. |
 
-Keys are never hardcoded. Do not commit them to the repo.
+Both are NVIDIA API keys. Keys are read at runtime and never hardcoded.
+
+### Endpoints and model
+
+- MolMIM: `https://health.api.nvidia.com/v1/biology/nvidia/molmim/generate`
+- LLM: `https://integrate.api.nvidia.com/v1/chat/completions`, model `meta/muse-glimmer-30b` (resolved from the catalog if the id differs)
 
 ### Running
 
-1. Open the notebook in Colab and add the secrets above.
-2. Run the cells top to bottom. Step 3 verifies both endpoints and prints a hint for each failure (401/403 means wrong key, 404 means wrong model id, 429 means rate limit).
-3. To use your own lead, set `lead = "<your SMILES>"` and call `generate_analogs` → `validate_and_score` → `rank_with_llm_v2`.
-4. Potency estimates require a ChEMBL ID, so they are available for ChEMBL leads only (`build_potency_reference("CHEMBLxxxx")`).
-
-If the model id in `LLM_MODEL` differs from the NIM catalog, the notebook looks up a Glimmer model from `/v1/models` automatically.
+1. Add the secrets in Colab and run the notebook top to bottom.
+2. Step 3 prints `Both APIs working. Continue.` when both keys are valid. If it does not, a 401 or 403 means a wrong key, 404 a wrong model id, and 429 a rate limit.
+3. To use your own lead, set `lead` to a SMILES string and call `generate_analogs`, `validate_and_score`, `check_toxicity_pains` and `rank_with_llm_v2` in sequence. Alternatively, run `app.invoke(...)` with the LangGraph state.
 
 ---
 
-## Example results (from the saved run)
+## Example results (from the saved outputs)
 
-**Lead: Prazosin (CHEMBL2)**
+**Lead: Prazosin (CHEMBL2)**, potency reference on the Alpha-1A adrenergic receptor (2,241 known compounds):
 
-| Metric | Value |
-|--------|-------|
-| Lead QED | 0.727 |
-| Best analog QED | 0.925 (+27.3%) |
-| Average analog QED | 0.854 |
-| Avg. Tanimoto similarity to lead | 0.436 |
-| Lipinski pass | 10/10 |
-| Overall toxicity / PAINS pass | 8/10 each |
-| Synthesis | 10/10 Easy (mean SA 2.33) |
-| Potency reference | Alpha-1A adrenergic receptor (CHEMBL229), 2,241 known compounds |
-| Potency-model leave-one-out | MAE 0.67 pChEMBL units, Pearson r = 0.73 |
-| Best analog estimated pChEMBL | 8.50 vs. lead 9.23; **0/10 analogs estimated ≥ lead** |
+- Lead QED 0.727, best analog QED 0.929 (+27.9%), average analog QED 0.882.
+- 10/10 analogs passed Lipinski, PAINS and overall toxicity filters. All were rated Easy to synthesise (mean SA 2.31).
+- Average Tanimoto similarity to the lead was 0.482, which indicates reasonable diversity.
+- Potency estimator leave-one-out check: **MAE 0.67 pChEMBL units, Pearson r = 0.73**.
+- Estimated potency was below the lead for every analog (best estimate 8.89 vs lead 9.23).
 
-**One-shot vs. agent loop (5 leads).** Best-QED and QED-gain figures were similar between the two approaches. The agent loop raised the pass rate on one lead (Ofloxacin, 0.7 → 1.0), lowered it on another (Indomethacin, 1.0 → 0.7), and left the rest unchanged or marginally different. The notebook does not show a consistent advantage for the loop on these metrics. With one run per lead and 10 molecules per run, the comparison is anecdotal.
+**One-shot vs agent loop** (5 ChEMBL leads: Prazosin, Nicotine, Ofloxacin, Nalidixic acid, Indomethacin):
 
-Imatinib was also run end to end (10 analogs generated, 6 unique after deduplication).
+- The loop was equal or better on best QED in 4 of 5 leads.
+- The loop improved pass rate on Nicotine (0.90 → 1.00) and Indomethacin (0.70 → 0.89).
+- The loop increased diversity on 4 of 5 leads.
+- The loop also produced more usable candidates for Prazosin and Nalidixic acid, because one-shot generation lost some to deduplication.
+
+Results vary between runs because MolMIM generation is stochastic.
 
 ---
 
 ## Limitations
 
-- **Heuristic safety.** hERG risk and reactive-group alerts are simple rules, and PAINS flags assay interference, not toxicity. None of these replace ADMET models or experiments.
-- **QED optimization bias.** MolMIM optimizes QED, which favors small, simple, "pretty" molecules. Analogs may drift far from the lead's pharmacophore (e.g. losing the 2-amino group in Prazosin analogs) and the pipeline does not check target binding.
-- **Potency is a ligand-based estimate.** It is a kNN over ChEMBL data, only as good as the nearest known compounds, and not a docking or affinity prediction. Treat LOW-confidence values as unreliable.
-- **LLM rationales are not validated.** Muse Glimmer ranks and explains based on the numbers it is given and may overstate or misjudge chemistry. Review its output critically.
-- **Small samples.** Each run generates 10 molecules (often fewer after deduplication and validity checks). Results vary between runs.
-- **ChEMBL lead selection.** Step 7 takes the first five matches returned by the API, not a curated set.
-- **External dependencies.** Requires live NVIDIA and ChEMBL APIs; the SA scorer is downloaded from the RDKit GitHub repo if not bundled.
+- **QED-driven generation.** MolMIM optimises QED, so the analogs tend to score well on it by construction. A high QED gain says little about biological activity.
+- **Heuristic safety screens.** The hERG check, reactive-group alerts and logP flags are screening heuristics, not validated toxicity models. PAINS covers assay interference, not in-vivo toxicity.
+- **Potency is a ligand-based estimate.** It uses nearest-neighbour similarity on one target. It only applies to ChEMBL leads with human pChEMBL data. It is unreliable for structures far from known actives (see the confidence column), and it cannot capture new binding modes.
+- **LLM rationale is not ground truth.** The ranking explanation is generated text and can contain chemical claims that need checking by a chemist.
+- **Small samples.** Each run has about 10 analogs per lead and the evaluation covers only a few leads, so the metrics are indicative, not statistically robust.
+- **Lead selection.** The ChEMBL fetch takes the first approved small molecules returned by the API, not a curated set.
+- **No synthesis planning, docking or ADME modelling.**
 
 ---
 
-## Possible next steps
+## Technologies
 
-- Replace heuristics with trained ADMET / hERG models
-- Add docking or a target-specific activity model for potency
-- Add scaffold-preservation constraints and retrosynthesis checks
-- Wrap in a Streamlit UI (`streamlit` is already installed)
-- Run repeated trials per lead for a statistically meaningful loop vs. one-shot comparison
+NVIDIA BioNeMo MolMIM · Muse Glimmer via NVIDIA NIM · RDKit · ChEMBL web resource client · LangGraph · pandas / NumPy / matplotlib
 
 ---
-
-## Acknowledgments
-
-[NVIDIA BioNeMo MolMIM](https://build.nvidia.com/nvidia/molmim-generate) · [RDKit](https://www.rdkit.org/) · [ChEMBL](https://www.ebi.ac.uk/chembl/) · [LangGraph](https://github.com/langchain-ai/langgraph) · NVIDIA NIM (Muse Glimmer)
 
 ## Disclaimer
 
-For research and educational use only. Outputs are computational suggestions and must not be used for clinical or therapeutic decisions.
+This project is for research and educational purposes. Generated molecules are computational suggestions only. They have not been synthesised or tested, and nothing here is medical advice.
